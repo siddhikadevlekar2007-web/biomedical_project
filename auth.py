@@ -1,43 +1,69 @@
-"""Small role-based demo authentication for the PharmaGuard prototype."""
+"""Local user account registration and role-based session helpers."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+import secrets
 
 import streamlit as st
 
-# Demo-only credentials. Replace these with managed identity and hashed secrets
-# from a secure secrets store before deploying to a real clinical environment.
-_SALT = b"pharmaguard-demo-only"
-_ACCOUNTS = {
-    "admin": ("Admin", "admin123"),
-    "user": ("User", "user123"),
-}
+import database
 
 
-def _password_digest(password: str) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), _SALT, 120_000)
+def _password_digest(password: str, salt: bytes) -> bytes:
+    """Hash a password with scrypt and a unique random salt."""
+    return hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
 
 
-def authenticate(username: str, password: str, requested_role: str) -> bool:
-    """Authenticate a demo account and persist its role in Streamlit session state."""
-    account = _ACCOUNTS.get(username.strip().casefold())
+def normalize_email(email: str) -> str:
+    """Validate and normalize an email address for account identity."""
+    normalized = email.strip().casefold()
+    if len(normalized) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized):
+        raise ValueError("Enter a valid email address.")
+    return normalized
+
+
+def create_account(email: str, password: str, password_confirmation: str) -> None:
+    """Create a standard User account after validating its email and password."""
+    normalized_email = normalize_email(email)
+    if len(password) < 12:
+        raise ValueError("Use a password with at least 12 characters.")
+    if len(password) > 1024:
+        raise ValueError("Password must be 1024 characters or fewer.")
+    if password != password_confirmation:
+        raise ValueError("The passwords do not match.")
+    salt = secrets.token_bytes(16)
+    password_hash = _password_digest(password, salt)
+    database.create_user_account(normalized_email, salt.hex(), password_hash.hex())
+
+
+def authenticate(email: str, password: str) -> bool:
+    """Verify credentials and start a regular User session."""
+    normalized_email = normalize_email(email)
+    if len(password) > 1024:
+        return False
+    account = database.get_user_account(normalized_email)
     if account is None:
         return False
-    role, expected_password = account
-    if role != requested_role or not hmac.compare_digest(
-        _password_digest(password), _password_digest(expected_password)
-    ):
+    try:
+        salt = bytes.fromhex(account["salt"])
+        expected_hash = bytes.fromhex(account["password_hash"])
+    except ValueError as exc:
+        raise RuntimeError("The saved account credentials are invalid.") from exc
+    if not hmac.compare_digest(_password_digest(password, salt), expected_hash):
         return False
     st.session_state["authenticated"] = True
-    st.session_state["username"] = username.strip()
-    st.session_state["role"] = role
+    st.session_state["username"] = normalized_email
+    st.session_state["role"] = "User"
+    st.session_state["auth_method"] = "local"
     return True
 
 
 def logout() -> None:
-    """Clear authentication identity without disturbing other application state."""
+    """Clear the local authentication identity without disturbing app data."""
     st.session_state["authenticated"] = False
     st.session_state["username"] = None
     st.session_state["role"] = None
+    st.session_state["auth_method"] = None

@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS interactions (
 )
 """
 
+_ACCOUNT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_accounts (
+    email TEXT PRIMARY KEY COLLATE NOCASE,
+    salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 def _connect() -> sqlite3.Connection:
     """Open a row-aware database connection."""
@@ -98,6 +107,7 @@ def initialize_database() -> None:
     try:
         with _connect() as connection:
             connection.execute(_SCHEMA)
+            connection.execute(_ACCOUNT_SCHEMA)
             count = connection.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
             if count == 0:
                 connection.executemany(
@@ -124,6 +134,33 @@ def get_interactions() -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
     except sqlite3.Error as exc:
         raise RuntimeError(f"Could not read the PharmaGuard knowledge base: {exc}") from exc
+
+
+def create_user_account(email: str, salt: str, password_hash: str) -> None:
+    """Persist a new user account; credentials must already be securely hashed."""
+    try:
+        with _connect() as connection:
+            connection.execute(
+                "INSERT INTO user_accounts (email, salt, password_hash) VALUES (?, ?, ?)",
+                (email, salt, password_hash),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("An account with this email already exists. Please sign in.") from exc
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Could not create the account: {exc}") from exc
+
+
+def get_user_account(email: str) -> dict[str, str] | None:
+    """Fetch stored password-verification data for an email, if it exists."""
+    try:
+        with _connect() as connection:
+            row = connection.execute(
+                "SELECT email, salt, password_hash FROM user_accounts WHERE email = ?",
+                (email,),
+            ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Could not look up the account: {exc}") from exc
 
 
 def add_interaction(interaction: dict[str, Any]) -> None:
